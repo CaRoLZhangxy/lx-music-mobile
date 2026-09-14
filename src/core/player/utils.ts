@@ -37,7 +37,7 @@ export const filterMusicList = ({ playedList, listId, list, playerMusicInfo, dis
   let playerIndex = -1
 
   let canPlayList: Array<LX.Music.MusicInfo | LX.Download.ListItem> = []
-  const filteredPlayedList = playedList.filter(pmInfo => pmInfo.listId == listId && !pmInfo.isTempPlay).map(({ musicInfo }) => musicInfo)
+  const playedMusicIds = new Set(playedList.filter(pmInfo => pmInfo.listId == listId && !pmInfo.isTempPlay).map(({ musicInfo }) => musicInfo.id))
   const hasDislike = (info: LX.Music.MusicInfo) => {
     const name = info.name?.replaceAll(SPLIT_CHAR.DISLIKE_NAME, SPLIT_CHAR.DISLIKE_NAME_ALIAS).toLocaleLowerCase().trim() ?? ''
     const singer = info.singer?.replaceAll(SPLIT_CHAR.DISLIKE_NAME, SPLIT_CHAR.DISLIKE_NAME_ALIAS).toLocaleLowerCase().trim() ?? ''
@@ -58,12 +58,8 @@ export const filterMusicList = ({ playedList, listId, list, playerMusicInfo, dis
 
     canPlayList.push(s)
 
-    let index = filteredPlayedList.findIndex(m => m.id == s.id)
-    if (index > -1) {
-      filteredPlayedList.splice(index, 1)
-      return false
-    }
-    return true
+    // 同一首歌可能在列表中出现多次，所有同 ID 条目都应退出本轮随机播放。
+    return !playedMusicIds.has(s.id)
   })
   if (playerMusicInfo) {
     if (isDislike) {
@@ -130,4 +126,3 @@ export const filterList = async({ playedList, listId, list, playerMusicInfo, isN
   }
   return { filteredList, playerIndex }
 }
-
