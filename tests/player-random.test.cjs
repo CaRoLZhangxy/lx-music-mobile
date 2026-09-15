@@ -17,16 +17,18 @@ function createPlayer(ids) {
   const dislikeInfo = { names: new Set(), musicNames: new Set(), singerNames: new Set() }
   const setting = { 'player.togglePlayMethod': 'random' }
   let random = () => 0
+  let stop = async() => {}
+  const playbackRequests = []
   const mocks = {
     '@/store/player/state': state,
     '@/store/setting/state': { setting },
     '@/store/dislikeList': { state: { dislikeInfo } },
     '@/utils': {},
     '@/utils/common': { getRandom: (min, max) => Math.floor(random() * (max - min)) + min },
-    '@/utils/tools': { debounceBackgroundTimer: () => () => {} },
+    '@/utils/tools': { debounceBackgroundTimer: () => musicInfo => playbackRequests.push(musicInfo.id) },
     '@/utils/message': { requestMsg: {} },
     '@/config/constant': { SPLIT_CHAR: { DISLIKE_NAME: '@', DISLIKE_NAME_ALIAS: '#' }, LIST_IDS: {} },
-    '@/plugins/player': { isInitialized: () => true, setStop: async() => {} },
+    '@/plugins/player': { isInitialized: () => true, setStop: () => stop() },
     'react-native-background-timer': { clearTimeout() {} },
     '@/core/player/playStatus': {},
     '@/core/music': {},
@@ -76,11 +78,101 @@ function createPlayer(ids) {
     state,
     list,
     dislikeInfo,
+    playbackRequests,
     utils: load('src/core/player/utils.ts'),
     player: load('src/core/player/player.ts'),
     setRandom(fn) { random = fn },
+    setStop(fn) { stop = fn },
   }
 }
+
+function deferred() {
+  let resolve
+  const promise = new Promise(r => { resolve = r })
+  return { promise, resolve }
+}
+
+test('record the selected song before waiting for the native player', async() => {
+  const { player, state, setStop } = createPlayer(['A', 'B', 'C'])
+  await player.playList('test', 0)
+  const stopped = deferred()
+  const started = deferred()
+  setStop(() => { started.resolve(); return stopped.promise })
+  const next = player.playNext(true)
+  await started.promise
+  try {
+    assert.equal(state.playMusicInfo.musicInfo.id, 'B')
+    assert.deepEqual(Array.from(state.playedList, m => m.musicInfo.id), ['A', 'B'])
+  } finally {
+    stopped.resolve()
+    await next
+  }
+})
+
+test('overlapping automatic next events share one transition', async() => {
+  const { player, state, setStop } = createPlayer(['A', 'B', 'C'])
+  await player.playList('test', 0)
+  const stopped = deferred()
+  const started = deferred()
+  setStop(() => { started.resolve(); return stopped.promise })
+  const first = player.playNext(true)
+  await started.promise
+  const second = player.playNext(true)
+  try {
+    assert.equal(first, second)
+    assert.equal(state.playMusicInfo.musicInfo.id, 'B')
+  } finally {
+    stopped.resolve()
+    await Promise.all([first, second])
+  }
+  await player.playNext(true)
+  assert.equal(state.playMusicInfo.musicInfo.id, 'C')
+})
+
+test('preloading that overlaps a transition cannot cache the song now playing', async() => {
+  const { player, state } = createPlayer(['A', 'B', 'C', 'D'])
+  await player.playList('test', 0)
+  const next = player.playNext(true)
+  const prefetch = player.getNextPlayMusicInfo()
+  await next
+  assert.equal(state.playMusicInfo.musicInfo.id, 'B')
+  assert.equal(await prefetch, null)
+  await player.playNext(true)
+  assert.equal(state.playMusicInfo.musicInfo.id, 'C')
+})
+
+test('an old selection cannot override a song clicked while it was pending', async() => {
+  const { player, state } = createPlayer(['A', 'B', 'C', 'D'])
+  await player.playList('test', 0)
+  const next = player.playNext(true)
+  await player.playList('test', 3)
+  await next
+  assert.equal(state.playMusicInfo.musicInfo.id, 'D')
+})
+
+test('a superseded native stop cannot start the old song', async() => {
+  const { player, setStop, playbackRequests } = createPlayer(['A', 'B', 'C', 'D'])
+  await player.playList('test', 0)
+  const stopped = deferred()
+  const started = deferred()
+  setStop(() => { started.resolve(); return stopped.promise })
+  const next = player.playNext(true)
+  await started.promise
+  const clicked = player.playList('test', 3)
+  stopped.resolve()
+  await Promise.all([next, clicked])
+  assert.deepEqual(playbackRequests, ['A', 'D'])
+})
+
+test('automatic next can recover after the native stop rejects', async() => {
+  const { player, state, setStop } = createPlayer(['A', 'B', 'C'])
+  await player.playList('test', 0)
+  setStop(async() => { throw new Error('native stop failed') })
+  await assert.rejects(player.playNext(true), /native stop failed/)
+  setStop(async() => {})
+  await player.playNext(true)
+  assert.equal(state.playMusicInfo.musicInfo.id, 'C')
+})
 
 test('exclude every duplicate of a played ID without changing the list or history', () => {
   const { utils, list, dislikeInfo } = createPlayer(['A', 'B', 'C', 'C', 'C'])

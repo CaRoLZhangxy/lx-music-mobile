@@ -253,14 +253,16 @@ const handlePlay = async() => {
 
   if (!musicInfo) return
 
+  // 切歌状态先同步到历史，避免等待底层播放器时被当作历史中不存在的歌曲。
+  if (settingState.setting['player.togglePlayMethod'] == 'random' && !playMusicInfo.isTempPlay) addPlayedList(playMusicInfo as LX.Player.PlayMusicInfo)
+
   await setStop()
+  if (playMusicInfo !== playerState.playMusicInfo) return
   global.app_event.pause()
 
   clearDelayNextTimeout()
   clearLoadTimeout()
 
-
-  if (settingState.setting['player.togglePlayMethod'] == 'random' && !playMusicInfo.isTempPlay) addPlayedList(playMusicInfo as LX.Player.PlayMusicInfo)
 
   debouncePlay(musicInfo)
 }
@@ -363,6 +365,8 @@ export const getNextPlayMusicInfo = async(): Promise<LX.Player.PlayMusicInfo | n
     isNext: true,
   })
 
+  // 预加载计算期间可能已经切歌，不能把旧歌曲的候选写回下一首缓存。
+  if (playMusicInfo !== playerState.playMusicInfo) return null
   if (!filteredList.length) return null
   // let currentIndex: number = filteredList.indexOf(currentList[playInfo.playerPlayIndex])
   if (playerIndex == -1 && filteredList.length) playerIndex = 0
@@ -408,7 +412,7 @@ const handlePlayNext = async(playMusicInfo: LX.Player.PlayMusicInfo) => {
  * @param isAutoToggle 是否自动切换
  * @returns
  */
-export const playNext = async(isAutoToggle = false): Promise<void> => {
+const handleNext = async(isAutoToggle: boolean): Promise<void> => {
   if (playerState.tempPlayList.length) { // 如果稍后播放列表存在歌曲则直接播放改列表的歌曲
     const playMusicInfo = playerState.tempPlayList[0]
     removeTempPlayList(0)
@@ -465,6 +469,7 @@ export const playNext = async(isAutoToggle = false): Promise<void> => {
     isNext: true,
   })
 
+  if (playMusicInfo !== playerState.playMusicInfo) return
   if (!filteredList.length) return handleToggleStop()
   // let currentIndex: number = filteredList.indexOf(currentList[playInfo.playerPlayIndex])
   if (playerIndex == -1 && filteredList.length) playerIndex = 0
@@ -502,6 +507,18 @@ export const playNext = async(isAutoToggle = false): Promise<void> => {
     listId: currentListId,
     isTempPlay: false,
   })
+}
+
+let autoNextPromise: Promise<void> | null = null
+export const playNext = (isAutoToggle = false): Promise<void> => {
+  if (!isAutoToggle) return handleNext(false)
+  // 结束、错误或超时事件重叠时，同一次自动切歌只执行一次。
+  if (!autoNextPromise) {
+    autoNextPromise = handleNext(true).finally(() => {
+      autoNextPromise = null
+    })
+  }
+  return autoNextPromise
 }
 
 /**
@@ -665,4 +682,3 @@ export const dislikeMusic = async() => {
   await addDislikeInfo([{ name: minfo.name, singer: minfo.singer }])
   await playNext(true)
 }
-
