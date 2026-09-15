@@ -253,14 +253,15 @@ const handlePlay = async() => {
 
   if (!musicInfo) return
 
+  // 等待底层播放器前先记录歌曲，避免重叠的切歌请求误从历史第一首开始播放。
+  if (settingState.setting['player.togglePlayMethod'] == 'random' && !playMusicInfo.isTempPlay) addPlayedList(playMusicInfo as LX.Player.PlayMusicInfo)
+
   await setStop()
   global.app_event.pause()
 
   clearDelayNextTimeout()
   clearLoadTimeout()
 
-
-  if (settingState.setting['player.togglePlayMethod'] == 'random' && !playMusicInfo.isTempPlay) addPlayedList(playMusicInfo as LX.Player.PlayMusicInfo)
 
   debouncePlay(musicInfo)
 }
@@ -408,7 +409,7 @@ const handlePlayNext = async(playMusicInfo: LX.Player.PlayMusicInfo) => {
  * @param isAutoToggle 是否自动切换
  * @returns
  */
-export const playNext = async(isAutoToggle = false): Promise<void> => {
+const handleNext = async(isAutoToggle: boolean): Promise<void> => {
   if (playerState.tempPlayList.length) { // 如果稍后播放列表存在歌曲则直接播放改列表的歌曲
     const playMusicInfo = playerState.tempPlayList[0]
     removeTempPlayList(0)
@@ -502,6 +503,18 @@ export const playNext = async(isAutoToggle = false): Promise<void> => {
     listId: currentListId,
     isTempPlay: false,
   })
+}
+
+let autoNextPromise: Promise<void> | null = null
+export const playNext = (isAutoToggle = false): Promise<void> => {
+  if (!isAutoToggle) return handleNext(false)
+  // 结束、错误或超时事件重叠时，同一次自动切歌只执行一次。
+  if (!autoNextPromise) {
+    autoNextPromise = handleNext(true).finally(() => {
+      autoNextPromise = null
+    })
+  }
+  return autoNextPromise
 }
 
 /**
