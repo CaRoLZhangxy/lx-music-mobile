@@ -8,6 +8,7 @@ const ts = require('typescript')
 const root = path.resolve(__dirname, '..')
 const compiled = new Map()
 const song = id => ({ id, name: id, singer: 'test', meta: {} })
+const entry = id => ({ musicInfo: song(id), listId: 'test', isTempPlay: false })
 
 // Run the real selection and history modules; isolate native audio and UI effects.
 function createPlayer(ids) {
@@ -74,6 +75,7 @@ function createPlayer(ids) {
   }
   return {
     state,
+    setting,
     list,
     dislikeInfo,
     utils: load('src/core/player/utils.ts'),
@@ -89,25 +91,64 @@ function deferred() {
   return { promise, resolve }
 }
 
-
-test('record the selected song before waiting for the native player', async() => {
-  const { player, state, setStop } = createPlayer(['A', 'B', 'C'])
-  await player.playList('test', 0)
-  const stopped = deferred()
-  const started = deferred()
-  setStop(() => { started.resolve(); return stopped.promise })
-  const next = player.playNext(true)
-  await started.promise
-  try {
-    assert.equal(state.playMusicInfo.musicInfo.id, 'B')
-    assert.deepEqual(Array.from(state.playedList, m => m.musicInfo.id), ['A', 'B'])
-  } finally {
-    stopped.resolve()
-    await next
+for (const preview of [false, true]) {
+  const cases = [
+    { name: 'missing current song skips history and excludes itself', ids: ['A', 'B', 'C', 'D'], current: 1, history: ['A'], expected: 'C' },
+    { name: 'found current song follows the next history entry', ids: ['A', 'B', 'C', 'D'], current: 1, history: ['A', 'B', 'C'], expected: 'C' },
+    { name: 'history tail resumes random selection', ids: ['A', 'B', 'C'], current: 1, history: ['A', 'B'], expected: 'C' },
+    { name: 'empty history excludes the current song when alternatives exist', ids: ['A', 'B', 'C'], current: 0, history: [], expected: 'B' },
+    { name: 'only available candidate remains playable', ids: ['A'], current: 0, history: [], expected: 'A' },
+    { name: 'deleted history entry does not skip the next valid entry', ids: ['A', 'C', 'D'], current: 0, history: ['A', 'B', 'C', 'D'], expected: 'C' },
+    { name: 'a new round excludes the current song when alternatives exist', ids: ['A', 'B'], current: 0, history: ['B', 'A'], expected: 'B' },
+  ]
+  for (const scenario of cases) {
+    test(`${scenario.name} (preview=${preview})`, async() => {
+      const { player, state } = createPlayer(scenario.ids)
+      await player.playList('test', scenario.current)
+      state.playedList = scenario.history.map(entry)
+      if (preview) {
+        const next = await player.getNextPlayMusicInfo()
+        assert.equal(next.musicInfo.id, scenario.expected)
+      }
+      await player.playNext(true)
+      assert.equal(state.playMusicInfo.musicInfo.id, scenario.expected)
+    })
   }
+
+  test(`missing current song does not reset unrelated history (preview=${preview})`, async() => {
+    const { player, state } = createPlayer(['A', 'B', 'C'])
+    await player.playList('test', 1)
+    state.playedList = [entry('A')]
+    if (preview) {
+      await player.getNextPlayMusicInfo()
+      assert.deepEqual(Array.from(state.playedList, m => m.musicInfo.id), ['A'])
+    }
+    await player.playNext(true)
+    assert.deepEqual(Array.from(state.playedList, m => m.musicInfo.id), ['A', 'C'])
+  })
+
+  test(`temporary playback resumes from the original song's history position (preview=${preview})`, async() => {
+    const { player, state } = createPlayer(['A', 'B', 'C'])
+    await player.playList('test', 1)
+    state.playedList = ['A', 'B', 'C'].map(entry)
+    state.playMusicInfo = { musicInfo: song('X'), listId: 'other', isTempPlay: true }
+    if (preview) assert.equal((await player.getNextPlayMusicInfo()).musicInfo.id, 'C')
+    await player.playNext(true)
+    assert.equal(state.playMusicInfo.musicInfo.id, 'C')
+  })
+}
+
+test('single-loop playback is not affected by random candidate filtering', async() => {
+  const { player, state, setting } = createPlayer(['A', 'B'])
+  setting['player.togglePlayMethod'] = 'singleLoop'
+  await player.playList('test', 0)
+  assert.equal((await player.getNextPlayMusicInfo()).musicInfo.id, 'A')
+  await player.playNext(true)
+  assert.equal(state.playMusicInfo.musicInfo.id, 'A')
 })
 
-test('overlapping automatic next events share one transition', async() => {
+
+test('a second next request does not jump to the first history entry while native stop is pending', async() => {
   const { player, state, setStop } = createPlayer(['A', 'B', 'C'])
   await player.playList('test', 0)
   const stopped = deferred()
@@ -115,15 +156,15 @@ test('overlapping automatic next events share one transition', async() => {
   setStop(() => { started.resolve(); return stopped.promise })
   const first = player.playNext(true)
   await started.promise
+  // Reproduce the missing-history state without moving history updates earlier.
+  const historyBeforeSecond = Array.from(state.playedList, m => m.musicInfo.id)
+  const secondStarted = deferred()
+  setStop(() => { secondStarted.resolve(); return stopped.promise })
   const second = player.playNext(true)
-  try {
-    assert.equal(first, second)
-    assert.equal(state.playMusicInfo.musicInfo.id, 'B')
-  } finally {
-    stopped.resolve()
-    await Promise.all([first, second])
-  }
-  await player.playNext(true)
+  await secondStarted.promise
+  stopped.resolve()
+  await Promise.all([first, second])
+  assert.deepEqual(historyBeforeSecond, ['A'])
   assert.equal(state.playMusicInfo.musicInfo.id, 'C')
 })
 
